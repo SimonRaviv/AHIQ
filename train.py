@@ -1,23 +1,27 @@
-from tqdm import tqdm 
+from tqdm import tqdm
 import os
-import torch 
+import torch
 import numpy as np
 import logging
 from scipy.stats import spearmanr, pearsonr
 import timm
 from timm.models.vision_transformer import Block
-from timm.models.resnet import BasicBlock,Bottleneck
+from timm.models.resnet import BasicBlock, Bottleneck
 import time
+import copy
+import sys
+import gc
 
 from torch.utils.data import DataLoader
 
-from utils.util import setup_seed,set_logging,SaveOutput
+from utils.util import setup_seed, set_logging, SaveOutput
 from script.extract_feature import get_resnet_feature, get_vit_feature
 from options.train_options import TrainOptions
 from model.deform_regressor import deform_fusion, Pixel_Prediction
-from data.pipal import PIPAL
-from utils.process_image import ToTensor, RandHorizontalFlip, RandCrop, crop_image, Normalize, five_point_crop
-from torchvision import transforms
+# from data.pipal import PIPAL
+# from utils.process_image import ToTensor, RandHorizontalFlip, RandCrop, crop_image, Normalize, five_point_crop
+# from torchvision import transforms
+
 
 class Train:
     def __init__(self, config):
@@ -27,19 +31,28 @@ class Train:
         self.init_data()
         self.criterion = torch.nn.MSELoss()
         self.optimizer = torch.optim.Adam([
-        {'params': self.regressor.parameters(), 'lr': self.opt.learning_rate,'weight_decay':self.opt.weight_decay}, 
-        {'params': self.deform_net.parameters(),'lr': self.opt.learning_rate,'weight_decay':self.opt.weight_decay}
+            {'params': self.regressor.parameters(), 'lr': self.opt.learning_rate, 'weight_decay': self.opt.weight_decay},
+            {'params': self.deform_net.parameters(), 'lr': self.opt.learning_rate, 'weight_decay': self.opt.weight_decay}
         ])
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.opt.T_max, eta_min=self.opt.eta_min)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=self.opt.T_max, eta_min=self.opt.eta_min)
         self.load_model()
         self.train()
+        if self.opt.evaluation_type == "cross_dataset":
+            self.eval_cross_dataset()
+
+    def eval_cross_dataset(self):
+        logging.info('Starting cross-dataset evaluation...')
+        for test_loader in self.test_loaders:
+            logging.info(f"Running testing on {test_loader.dataset}...")
+            self.eval_epoch(self.opt.n_epoch, test_loader)
 
     def create_model(self):
-        self.resnet50 =  timm.create_model('resnet50',pretrained=True).cuda()
+        self.resnet50 = timm.create_model('resnet50', pretrained=True).cuda()
         if self.opt.patch_size == 8:
-            self.vit = timm.create_model('vit_base_patch8_224',pretrained=True).cuda()
+            self.vit = timm.create_model('vit_base_patch8_224', pretrained=True).cuda()
         else:
-            self.vit = timm.create_model('vit_base_patch16_224',pretrained=True).cuda()
+            self.vit = timm.create_model('vit_base_patch16_224', pretrained=True).cuda()
         self.deform_net = deform_fusion(self.opt).cuda()
         self.regressor = Pixel_Prediction().cuda()
 
@@ -54,43 +67,109 @@ class Train:
             if isinstance(layer, Block):
                 handle = layer.register_forward_hook(self.save_output)
                 hook_handles.append(handle)
-    
+
     def init_data(self):
-        train_dataset = PIPAL(
-            ref_path=self.opt.train_ref_path,
-            dis_path=self.opt.train_dis_path,
-            txt_file_name=self.opt.train_list,
-            transform=transforms.Compose(
-                [
-                    RandCrop(self.opt.crop_size, self.opt.num_crop),
-                    #Normalize(0.5, 0.5),
-                    RandHorizontalFlip(),
-                    ToTensor(),
-                ]
-            ),
-        )
-        val_dataset = PIPAL(
-            ref_path=self.opt.val_ref_path,
-            dis_path=self.opt.val_dis_path,
-            txt_file_name=self.opt.val_list,
-            transform=ToTensor(),
-        )
-        logging.info('number of train scenes: {}'.format(len(train_dataset)))
-        logging.info('number of val scenes: {}'.format(len(val_dataset)))
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+
+        from lib_iqa.data.image_transformation import AHIQTransform
+        from lib_iqa.data.datasets import LIVEDataset, CSIQDataset, TID2013Dataset, KADID10KDataset, PIPALDataset
+
+        ROOT_DIR = os.path.join("/", "opt", "simonra", "perceptual_metric")
+        DATASETS_DIR = os.path.join(ROOT_DIR, "datasets")
+        LIVE_DS_PATH = os.path.join(DATASETS_DIR, "live")
+        CSIQ_DS_PATH = os.path.join(DATASETS_DIR, "csiq")
+        TID2013_DS_PATH = os.path.join(DATASETS_DIR, "tid2013")
+        KADID10K_DS_PATH = os.path.join(DATASETS_DIR, "kadid10k")
+        PIPAL_DS_PATH = os.path.join(DATASETS_DIR, "pipal")
+        # train_dataset = PIPAL(
+        #     ref_path=self.opt.train_ref_path,
+        #     dis_path=self.opt.train_dis_path,
+        #     txt_file_name=self.opt.train_list,
+        #     transform=transforms.Compose(
+        #         [
+        #             RandCrop(self.opt.crop_size, self.opt.num_crop),
+        #             #Normalize(0.5, 0.5),
+        #             RandHorizontalFlip(),
+        #             ToTensor(),
+        #         ]
+        #     ),
+        # )
+        # val_dataset = PIPAL(
+        #     ref_path=self.opt.val_ref_path,
+        #     dis_path=self.opt.val_dis_path,
+        #     txt_file_name=self.opt.val_list,
+        #     transform=ToTensor(),
+        # )
+
+        dl_kwargs = {
+            "drop_last": True, "prefetch_factor": 2
+        }
+
+        if self.opt.evaluation_type == "traditional_datasets":
+            transform = AHIQTransform(size=self.opt.crop_size, crop=True, eval_center_crop=self.opt.eval_center_crop)
+            if self.opt.dataset == 'LIVE':
+                dataset = LIVEDataset(root_dir=LIVE_DS_PATH, transform=copy.deepcopy(transform))
+            elif self.opt.dataset == 'CSIQ':
+                dataset = CSIQDataset(root_dir=CSIQ_DS_PATH, transform=copy.deepcopy(transform))
+            elif self.opt.dataset == 'TID2013':
+                dataset = TID2013Dataset(root_dir=TID2013_DS_PATH, transform=copy.deepcopy(transform))
+            else:
+                raise ValueError('Dataset not supported')
+
+            sets_split = (0.8, 0.2, 0)  # train, val, test
+            normalize_labels = True
+            dataset.reset_labels(normalize_labels)
+            train_indicis, val_indicis, test_indicis = dataset.get_sets_split_indicis(*sets_split, seed=self.opt.seed)
+            if sets_split[2] == 0:
+                val_indicis += test_indicis
+            train_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), train_indicis)
+            val_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), val_indicis)
+            test_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), test_indicis)
+
+            val_dataset.dataset.is_train = test_dataset.dataset.is_train = False
+            self.opt.val_batch_size = self.opt.batch_size * 2  # Faster evaluation
+
+            logging.info('number of train scenes: {}'.format(len(train_dataset)))
+            logging.info('number of val scenes: {}'.format(len(val_dataset)))
+
+            self.val_loader = DataLoader(
+                dataset=val_dataset,
+                batch_size=self.opt.val_batch_size,
+                shuffle=False,
+                **dl_kwargs
+            )
+        elif self.opt.evaluation_type == "cross_dataset":
+            self.opt.val_batch_size = self.opt.batch_size * 2  # Faster evaluation
+            if self.opt.dataset == 'KADID-10K':
+                ds_path, ds_cls = KADID10K_DS_PATH, KADID10KDataset
+            elif self.opt.dataset == 'PIPAL':
+                ds_path, ds_cls = PIPAL_DS_PATH, PIPALDataset
+            else:
+                raise ValueError('Dataset not supported')
+
+            train_dataset = ds_cls(root_dir=ds_path, transform=AHIQTransform(size=self.opt.crop_size, crop=True))
+            test_datasets = [
+                LIVEDataset(
+                    root_dir=LIVE_DS_PATH, transform=AHIQTransform(size=self.opt.crop_size, crop=True), is_train=False),
+                CSIQDataset(
+                    root_dir=CSIQ_DS_PATH, transform=AHIQTransform(size=self.opt.crop_size, crop=True), is_train=False),
+                TID2013Dataset(
+                    root_dir=TID2013_DS_PATH, transform=AHIQTransform(size=self.opt.crop_size, crop=True), is_train=False)]
+
+            self.test_loaders = [DataLoader(
+                dataset=test_ds, batch_size=self.opt.val_batch_size,
+                num_workers=self.opt.num_workers - 1,
+                shuffle=False, **dl_kwargs) for test_ds in test_datasets]
+        else:
+            raise ValueError('Evaluation type not supported')
 
         self.train_loader = DataLoader(
             dataset=train_dataset,
-            batch_size=self.opt.batch_size,
             num_workers=self.opt.num_workers,
-            drop_last=True,
-            shuffle=True
-        )
-        self.val_loader = DataLoader(
-            dataset=val_dataset,
             batch_size=self.opt.batch_size,
-            num_workers=self.opt.num_workers,
-            drop_last=True,
-            shuffle=False
+            shuffle=True,
+            persistent_workers=True,
+            **dl_kwargs
         )
 
     def load_model(self):
@@ -102,7 +181,7 @@ class Train:
                     if file.startswith("epoch_"):
                         load_epoch = max(load_epoch, int(file.split('.')[0].split('_')[1]))
                 self.opt.load_epoch = load_epoch
-                checkpoint = torch.load(os.path.join(models_dir,"epoch_"+str(self.opt.load_epoch)+".pth"))
+                checkpoint = torch.load(os.path.join(models_dir, "epoch_"+str(self.opt.load_epoch)+".pth"))
                 self.regressor.load_state_dict(checkpoint['regressor_model_state_dict'])
                 self.deform_net.load_state_dict(checkpoint['deform_net_model_state_dict'])
                 self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -114,11 +193,56 @@ class Train:
                 for file in os.listdir(models_dir):
                     if file.startswith("epoch_"):
                         found = int(file.split('.')[0].split('_')[1]) == self.opt.load_epoch
-                        if found: break
-                assert found, 'Model for epoch %i not found' % self.opt.load_epoch
+                        if found:
+                            break
+
+                    if not found:
+                        print(f"Model for epoch {self.opt.load_epoch} not found")
+                        self.opt.load_epoch = 0
+
+                    # assert found, 'Model for epoch %i not found' % self.opt.load_epoch
         else:
             assert self.opt.load_epoch < 1, 'Model for epoch %i not found' % self.opt.load_epoch
             self.opt.load_epoch = 0
+
+    def forward(self, data):
+        # d_img_org = data['d_img_org'].cuda()
+        # r_img_org = data['r_img_org'].cuda()
+        # labels = data['score']
+        d_img_org = data.distortion_image
+        r_img_org = data.reference_image
+        labels = data.label_normalized
+        labels = torch.squeeze(labels.type(torch.FloatTensor)).cuda()
+
+        _x = self.vit(d_img_org)
+        vit_dis = get_vit_feature(self.save_output)
+        self.save_output.outputs.clear()
+
+        _y = self.vit(r_img_org)
+        vit_ref = get_vit_feature(self.save_output)
+        self.save_output.outputs.clear()
+        B, N, C = vit_ref.shape
+        if self.opt.patch_size == 8:
+            H, W = 28, 28
+        else:
+            H, W = 14, 14
+        assert H*W == N
+        vit_ref = vit_ref.transpose(1, 2).view(B, C, H, W)
+        vit_dis = vit_dis.transpose(1, 2).view(B, C, H, W)
+
+        _ = self.resnet50(d_img_org)
+        cnn_dis = get_resnet_feature(self.save_output)  # 0,1,2都是[B,256,56,56]
+        self.save_output.outputs.clear()
+        cnn_dis = self.deform_net(cnn_dis, vit_ref)
+
+        _ = self.resnet50(r_img_org)
+        cnn_ref = get_resnet_feature(self.save_output)
+        self.save_output.outputs.clear()
+        cnn_ref = self.deform_net(cnn_ref, vit_ref)
+
+        pred = self.regressor(vit_dis, vit_ref, cnn_dis, cnn_ref)
+
+        return pred, labels
 
     def train_epoch(self, epoch):
         losses = []
@@ -129,41 +253,9 @@ class Train:
         # save data for one epoch
         pred_epoch = []
         labels_epoch = []
-        
+
         for data in tqdm(self.train_loader):
-            d_img_org = data['d_img_org'].cuda()
-            r_img_org = data['r_img_org'].cuda()
-            labels = data['score']
-            labels = torch.squeeze(labels.type(torch.FloatTensor)).cuda()
-
-            _x = self.vit(d_img_org)
-            vit_dis = get_vit_feature(self.save_output)
-            self.save_output.outputs.clear()
-
-            _y = self.vit(r_img_org)
-            vit_ref = get_vit_feature(self.save_output)
-            self.save_output.outputs.clear()
-            B, N, C = vit_ref.shape
-            if self.opt.patch_size == 8:
-                H,W = 28,28
-            else:
-                H,W = 14,14
-            assert H*W==N 
-            vit_ref = vit_ref.transpose(1, 2).view(B, C, H, W)
-            vit_dis = vit_dis.transpose(1, 2).view(B, C, H, W)
-
-            _ = self.resnet50(d_img_org)
-            cnn_dis = get_resnet_feature(self.save_output)   #0,1,2都是[B,256,56,56]
-            self.save_output.outputs.clear()
-            cnn_dis = self.deform_net(cnn_dis,vit_ref)
-
-            _ = self.resnet50(r_img_org)
-            cnn_ref = get_resnet_feature(self.save_output)
-            self.save_output.outputs.clear()
-            cnn_ref = self.deform_net(cnn_ref,vit_ref)
-
-            pred = self.regressor(vit_dis, vit_ref, cnn_dis, cnn_ref)
-
+            pred, labels = self.forward(data)
             self.optimizer.zero_grad()
             loss = self.criterion(torch.squeeze(pred), labels)
             losses.append(loss.item())
@@ -177,7 +269,7 @@ class Train:
             labels_batch_numpy = labels.data.cpu().numpy()
             pred_epoch = np.append(pred_epoch, pred_batch_numpy)
             labels_epoch = np.append(labels_epoch, labels_batch_numpy)
-        
+
         # compute correlation coefficient
         rho_s, _ = spearmanr(np.squeeze(pred_epoch), np.squeeze(labels_epoch))
         rho_p, _ = pearsonr(np.squeeze(pred_epoch), np.squeeze(labels_epoch))
@@ -187,7 +279,7 @@ class Train:
         logging.info('train epoch:{} / loss:{:.4} / SRCC:{:.4} / PLCC:{:.4}'.format(epoch + 1, ret_loss, rho_s, rho_p))
 
         return ret_loss, rho_s, rho_p
-    
+
     def train(self):
         best_srocc = 0
         best_plcc = 0
@@ -195,10 +287,11 @@ class Train:
             start_time = time.time()
             logging.info('Running training epoch {}'.format(epoch + 1))
             loss_val, rho_s, rho_p = self.train_epoch(epoch)
-            if (epoch + 1) % self.opt.val_freq == 0:
+            if self.opt.evaluation_type == "traditional_datasets" and (epoch + 1) % self.opt.val_freq == 0:
                 logging.info('Starting eval...')
                 logging.info('Running testing in epoch {}'.format(epoch + 1))
-                loss, rho_s, rho_p = self.eval_epoch(epoch)
+
+                loss, rho_s, rho_p = self.eval_epoch(epoch, self.val_loader)
                 logging.info('Eval done...')
 
                 if rho_s > best_srocc or rho_p > best_plcc:
@@ -206,78 +299,60 @@ class Train:
                     best_plcc = rho_p
                     print('Best now')
                     logging.info('Best now')
-                    self.save_model( epoch, "best.pth", loss, rho_s, rho_p)
-                if epoch % self.opt.save_interval == 0:
-                    weights_file_name = "epoch_%d.pth" % (epoch+1)
-                    self.save_model( epoch, weights_file_name, loss, rho_s, rho_p)
+                    self.save_model(epoch, "best.pth", loss, rho_s, rho_p)
+                    if epoch % self.opt.save_interval == 0:
+                        weights_file_name = "epoch_%d.pth" % (epoch+1)
+                        self.save_model(epoch, weights_file_name, loss, rho_s, rho_p)
+
             logging.info('Epoch {} done. Time: {:.2}min'.format(epoch + 1, (time.time() - start_time) / 60))
-    
-    def eval_epoch(self, epoch):
+
+        # Save last model for evluation:
+        if self.opt.evaluation_type == "cross_dataset":
+            weights_file_name = "last.pth"
+            self.save_model(epoch, weights_file_name, loss_val, rho_s, rho_p)
+
+        # Tear down the dataloaders to free up memory
+        self.train_loader = None
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def eval_epoch(self, epoch, val_loader=None):
         with torch.no_grad():
             losses = []
             self.regressor.train()
             self.deform_net.train()
             self.vit.eval()
             self.resnet50.eval()
-            # save data for one epoch
-            pred_epoch = []
-            labels_epoch = []
 
-            for data in tqdm(self.val_loader):
-                pred = 0
-                for i in range(self.opt.num_avg_val):
-                    d_img_org = data['d_img_org'].cuda()
-                    r_img_org = data['r_img_org'].cuda()
-                    labels = data['score']
-                    labels = torch.squeeze(labels.type(torch.FloatTensor)).cuda()
-                    
-                    d_img_org, r_img_org = five_point_crop(i, d_img=d_img_org, r_img=r_img_org, config=self.opt)
+            # average the stats over multiple intrations
+            iterations = 1 if self.opt.num_crop < 1 else self.opt.num_crop
+            pred_epoch = np.zeros((len(val_loader), iterations, self.opt.val_batch_size))
+            labels_epoch = np.zeros((len(val_loader), iterations, self.opt.val_batch_size))
 
-                    _x = self.vit(d_img_org)
-                    vit_dis = get_vit_feature(self.save_output)
-                    self.save_output.outputs.clear()
+            for iteration in range(iterations):
+                for batch_index, data in enumerate(tqdm(val_loader)):
+                    pred, labels = self.forward(data)
+                    # save results in one epoch
+                    pred_batch_numpy = pred.data.cpu().numpy().squeeze()
+                    labels_batch_numpy = labels.data.cpu().numpy().squeeze()
+                    pred_epoch[batch_index, iteration] = pred_batch_numpy
+                    labels_epoch[batch_index, iteration] = labels_batch_numpy
 
-                    _y = self.vit(r_img_org)
-                    vit_ref = get_vit_feature(self.save_output)
-                    self.save_output.outputs.clear()
-                    B, N, C = vit_ref.shape
-                    if self.opt.patch_size == 8:
-                        H,W = 28,28
-                    else:
-                        H,W = 14,14
-                    assert H*W==N 
-                    vit_ref = vit_ref.transpose(1, 2).view(B, C, H, W)
-                    vit_dis = vit_dis.transpose(1, 2).view(B, C, H, W)
+            # compute loss over iterations
+            pred_epoch = np.mean(pred_epoch, axis=1)
+            labels_epoch = np.mean(labels_epoch, axis=1)
+            pred_epoch = np.reshape(pred_epoch, (-1))
+            labels_epoch = np.reshape(labels_epoch, (-1))
+            loss = self.criterion(torch.tensor(pred_epoch), torch.tensor(labels_epoch))
+            losses.append(loss.item())
 
-                    _ = self.resnet50(d_img_org)
-                    cnn_dis = get_resnet_feature(self.save_output)   #0,1,2都是[B,256,56,56]
-                    self.save_output.outputs.clear()
-                    cnn_dis = self.deform_net(cnn_dis,vit_ref)
-
-                    _ = self.resnet50(r_img_org)
-                    cnn_ref = get_resnet_feature(self.save_output)
-                    self.save_output.outputs.clear()
-                    cnn_ref = self.deform_net(cnn_ref,vit_ref)
-
-                    pred += self.regressor(vit_dis, vit_ref, cnn_dis, cnn_ref)
-                    
-                pred /= self.opt.num_avg_val
-                # compute loss
-                loss = self.criterion(torch.squeeze(pred), labels)
-                loss_val = loss.item()
-                losses.append(loss_val)
-
-                # save results in one epoch
-                pred_batch_numpy = pred.data.cpu().numpy()
-                labels_batch_numpy = labels.data.cpu().numpy()
-                pred_epoch = np.append(pred_epoch, pred_batch_numpy)
-                labels_epoch = np.append(labels_epoch, labels_batch_numpy)
-            
             # compute correlation coefficient
             rho_s, _ = spearmanr(np.squeeze(pred_epoch), np.squeeze(labels_epoch))
             rho_p, _ = pearsonr(np.squeeze(pred_epoch), np.squeeze(labels_epoch))
-            print('Epoch:{} ===== loss:{:.4} ===== SRCC:{:.4} ===== PLCC:{:.4}'.format(epoch + 1, np.mean(losses), rho_s, rho_p))
-            logging.info('Epoch:{} ===== loss:{:.4} ===== SRCC:{:.4} ===== PLCC:{:.4}'.format(epoch + 1, np.mean(losses), rho_s, rho_p))
+            print('Epoch:{} ===== loss:{:.4} ===== SRCC:{:.4} ===== PLCC:{:.4}'.format(
+                epoch + 1, np.mean(losses), rho_s, rho_p))
+            logging.info('Epoch:{} ===== loss:{:.4} ===== SRCC:{:.4} ===== PLCC:{:.4}'.format(
+                epoch + 1, np.mean(losses), rho_s, rho_p))
             return np.mean(losses), rho_s, rho_p
 
     def save_model(self, epoch, weights_file_name, loss, rho_s, rho_p):
@@ -293,11 +368,13 @@ class Train:
         }, weights_file)
         logging.info('Saving weights and model of epoch{}, SRCC:{}, PLCC:{}'.format(epoch, rho_s, rho_p))
 
+
 if __name__ == '__main__':
+    torch.multiprocessing.set_sharing_strategy('file_system')
+    torch.multiprocessing.set_start_method("forkserver", force=True)
     config = TrainOptions().parse()
     config.checkpoints_dir = os.path.join(config.checkpoints_dir, config.name)
     setup_seed(config.seed)
     set_logging(config)
-    # logging.info(config)
+    logging.info(config)
     Train(config)
-    

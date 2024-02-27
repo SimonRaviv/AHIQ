@@ -10,6 +10,8 @@ class BaseOptions():
 
     def initialize(self):
         # dataset path
+        self._parser.add_argument('--dataset', type=str, default='PIPAL', help='dataset name',
+                                  choices=['LIVE', 'CSIQ', 'TID2013', 'PIPAL', 'KADID-10K'])
         self._parser.add_argument('--train_ref_path', type=str, default='Train_Ref/', help='path to reference images')
         self._parser.add_argument('--train_dis_path', type=str, default='Train_Dis/', help='path to distortion images')
         self._parser.add_argument('--val_ref_path', type=str, default='NTIRE2021/Ref/', help='path to reference images')
@@ -33,8 +35,17 @@ class BaseOptions():
         self._parser.add_argument('--num_avg_val', type=int, default=5, help='ensemble ways of validation')
         
         self._parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids')
-        self._initialized = True
+        self._parser.add_argument(
+            "-e", "--evaluation-type", default="traditional_datasets", type=str,
+            choices=["traditional_datasets", "cross_dataset"],
+            help="Evaluation type."
+        )
+        self._parser.add_argument(
+            "--eval-center-crop", default=False, action="store_true",
+            help="Center crop in evaluation."
+        )
 
+        self._initialized = True
     def parse(self):
         if not self._initialized:
             self.initialize()
