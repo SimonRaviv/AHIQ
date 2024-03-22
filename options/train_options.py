@@ -12,5 +12,7 @@ class TrainOptions(BaseOptions):
         self._parser.add_argument('--val_freq', type=int, default=1, help='validation frequency')
         self._parser.add_argument('--T_max', type=int, default=50, help="cosine learning rate period (iteration)")
         self._parser.add_argument('--eta_min', type=int, default=0, help="mininum learning rate")
+        self._parser.add_argument('--test', action='store_true', help='test mode')
+        self._parser.add_argument('--log_eval_predictions', action='store_true', help='log evaluation predictions')
         
         self.is_train = True
