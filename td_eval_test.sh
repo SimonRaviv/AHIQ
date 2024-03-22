@@ -2,12 +2,18 @@
 
 TRAIN_SCRIPT_PATH=/auto/mtrswgwork/simonra/masters/thesis/perceptual_metric/third_party/AHIQ/train.py
 RESULTS_PATH=/tmp/ahiq_results
-TRAIN_DATASETS=$1
+DATASET=$1
 SEED=$2
-declare -a TRAIN_DATASETS=("$TRAIN_DATASETS")
-declare -a TEST_DATASETS=("LIVE" "CSIQ" "TID2013")
-declare -a SEEDS=("$SEED")
-EVALUATION_TYPE="cross_dataset"
+CHECKPOINTS_DIR=$3
+declare -a DATASETS=("LIVE" "CSIQ" "TID2013")
+declare -a SEEDS=("42" "84" "126")
+if [ -n "$1" ]; then
+    DATASETS=("$1")
+fi
+# if [ -n "$2" ]; then
+#     SEEDS=("$2")
+# fi
+EVALUATION_TYPE="traditional_datasets"
 EPOCHS=50
 T_MAX=$EPOCHS
 LEARNING_RATE=0.0001
@@ -24,18 +30,14 @@ else
 fi
 # EVAL_CENTER_CROP="--eval-center-crop"
 EVAL_CENTER_CROP=""
+LOG_EVAL_PREDICTIONS="--log_eval_predictions"
 
-mkdir -p $RESULTS_PATH
-
-for dataset in "${TRAIN_DATASETS[@]}"; do
-    mkdir -p $RESULTS_PATH/$dataset
+for dataset in "${DATASETS[@]}"; do
     for seed in "${SEEDS[@]}"; do
-        results_dir=$RESULTS_PATH/$dataset/$seed
-        rm -rf $results_dir
-        mkdir -p $results_dir
+        checkpoints_dir=$CHECKPOINTS_DIR/$dataset/$seed
         python $TRAIN_SCRIPT_PATH \
             --evaluation-type $EVALUATION_TYPE \
-            --checkpoints_dir $results_dir \
+            --checkpoints_dir $checkpoints_dir \
             --dataset $dataset \
             --name $dataset \
             --seed $seed \
@@ -48,6 +50,8 @@ for dataset in "${TRAIN_DATASETS[@]}"; do
             --num_avg_val $NUM_AVG_VAL \
             --num_crop $NUM_CROPS \
             --patch_size $PATCH_SIZE \
-            $EVAL_CENTER_CROP
+            $EVAL_CENTER_CROP \
+            $LOG_EVAL_PREDICTIONS \
+            --test
     done
 done

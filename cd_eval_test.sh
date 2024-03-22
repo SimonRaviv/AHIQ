@@ -4,6 +4,7 @@ TRAIN_SCRIPT_PATH=/auto/mtrswgwork/simonra/masters/thesis/perceptual_metric/thir
 RESULTS_PATH=/tmp/ahiq_results
 TRAIN_DATASETS=$1
 SEED=$2
+CHECKPOINTS_DIR=$3
 declare -a TRAIN_DATASETS=("$TRAIN_DATASETS")
 declare -a TEST_DATASETS=("LIVE" "CSIQ" "TID2013")
 declare -a SEEDS=("$SEED")
@@ -25,17 +26,12 @@ fi
 # EVAL_CENTER_CROP="--eval-center-crop"
 EVAL_CENTER_CROP=""
 
-mkdir -p $RESULTS_PATH
-
 for dataset in "${TRAIN_DATASETS[@]}"; do
-    mkdir -p $RESULTS_PATH/$dataset
     for seed in "${SEEDS[@]}"; do
-        results_dir=$RESULTS_PATH/$dataset/$seed
-        rm -rf $results_dir
-        mkdir -p $results_dir
+        checkpoints_dir=$CHECKPOINTS_DIR/$seed/$train_dataset
         python $TRAIN_SCRIPT_PATH \
             --evaluation-type $EVALUATION_TYPE \
-            --checkpoints_dir $results_dir \
+            --checkpoints_dir $checkpoints_dir \
             --dataset $dataset \
             --name $dataset \
             --seed $seed \
@@ -48,6 +44,7 @@ for dataset in "${TRAIN_DATASETS[@]}"; do
             --num_avg_val $NUM_AVG_VAL \
             --num_crop $NUM_CROPS \
             --patch_size $PATCH_SIZE \
-            $EVAL_CENTER_CROP
+            $EVAL_CENTER_CROP \
+            --test
     done
 done
