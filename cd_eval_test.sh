@@ -6,7 +6,6 @@ TRAIN_DATASETS=$1
 SEED=$2
 CHECKPOINTS_DIR=$3
 declare -a TRAIN_DATASETS=("$TRAIN_DATASETS")
-declare -a TEST_DATASETS=("LIVE" "CSIQ" "TID2013")
 declare -a SEEDS=("$SEED")
 EVALUATION_TYPE="cross_dataset"
 EPOCHS=50
@@ -23,8 +22,13 @@ if [ "$TRAIN_DATASETS" == "KADID-10K" ] || [ "$TRAIN_DATASETS" == "PIPAL" ]; the
 else
     PATCH_SIZE=16
 fi
-# EVAL_CENTER_CROP="--eval-center-crop"
-EVAL_CENTER_CROP=""
+EVAL_CENTER_CROP="--eval-center-crop"
+# EVAL_CENTER_CROP=""
+LOG_EVAL_PREDICTIONS="--log_eval_predictions"
+
+if [ "$EVAL_CENTER_CROP" == "--eval-center-crop" ]; then
+    NUM_CROPS=1
+fi
 
 for dataset in "${TRAIN_DATASETS[@]}"; do
     for seed in "${SEEDS[@]}"; do
@@ -45,6 +49,7 @@ for dataset in "${TRAIN_DATASETS[@]}"; do
             --num_crop $NUM_CROPS \
             --patch_size $PATCH_SIZE \
             $EVAL_CENTER_CROP \
+            $LOG_EVAL_PREDICTIONS \
             --test
     done
 done

@@ -37,6 +37,7 @@ class Train:
         ])
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=self.opt.T_max, eta_min=self.opt.eta_min)
+        self.eval_predictions_data = None
 
         if self.opt.test is True:
             self.load_model_from_path(self.opt.checkpoints_dir)
@@ -132,23 +133,22 @@ class Train:
                 dataset = TID2013Dataset(root_dir=TID2013_DS_PATH, transform=copy.deepcopy(transform))
             elif self.opt.dataset == 'KADID-10K':
                 dataset = KADID10KDataset(root_dir=KADID10K_DS_PATH, transform=copy.deepcopy(transform))
+            elif self.opt.dataset == 'PIPAL':
+                dataset = PIPALDataset(root_dir=PIPAL_DS_PATH, transform=copy.deepcopy(transform))
             else:
                 raise ValueError('Dataset not supported')
 
-            if self.opt.test:
-                sets_split = (0, 0, 1)
-            else:
-                sets_split = (0.8, 0.2, 0)  # train, val, test
+            sets_split = (0.8, 0.2, 0)  # train, val, test
 
             normalize_labels = True
             dataset.reset_labels(normalize_labels)
-            train_indicis, val_indicis, test_indicis = dataset.get_sets_split_indicis(*sets_split, seed=self.opt.seed)
+            train_indexes, val_indexes, test_indexes = dataset.get_sets_split_indexes(*sets_split, seed=self.opt.seed)
             if sets_split[2] == 0:
-                val_indicis += test_indicis
+                val_indexes += test_indexes
 
-            train_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), train_indicis)
-            val_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), val_indicis)
-            test_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), test_indicis)
+            train_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), train_indexes)
+            val_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), val_indexes)
+            test_dataset = torch.utils.data.Subset(copy.deepcopy(dataset), test_indexes)
 
             train_dataset.dataset.split = "train_split"
             val_dataset.dataset.split = "val_split"
@@ -198,6 +198,10 @@ class Train:
                 dataset=test_ds, batch_size=self.opt.val_batch_size,
                 num_workers=self.opt.num_workers,
                 shuffle=False, **dl_kwargs) for test_ds in test_datasets]
+
+            train_dataset.split = "train_split"
+            for test_ds in test_datasets:
+                test_ds.split = f"train_{str(train_dataset)}_test_split"
         else:
             raise ValueError('Evaluation type not supported')
 
@@ -466,7 +470,7 @@ class Train:
         if self.opt.evaluation_type == "traditional_datasets":
             checkpoint_path = os.path.join(models_dir, "best.pth")
         else:
-            checkpoint_path = os.path.join(models_dir, "last.pth")
+            checkpoint_path = os.path.join(models_dir, "best.pth")
         checkpoint = torch.load(checkpoint_path)
         self.regressor.load_state_dict(checkpoint['regressor_model_state_dict'])
         self.deform_net.load_state_dict(checkpoint['deform_net_model_state_dict'])

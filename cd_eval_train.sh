@@ -25,6 +25,10 @@ fi
 # EVAL_CENTER_CROP="--eval-center-crop"
 EVAL_CENTER_CROP=""
 
+if [ "$EVAL_CENTER_CROP" == "--eval-center-crop" ]; then
+    NUM_CROPS=1
+fi
+
 mkdir -p $RESULTS_PATH
 
 for dataset in "${TRAIN_DATASETS[@]}"; do

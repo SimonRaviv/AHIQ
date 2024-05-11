@@ -10,9 +10,9 @@ declare -a SEEDS=("42" "84" "126")
 if [ -n "$1" ]; then
     DATASETS=("$1")
 fi
-# if [ -n "$2" ]; then
-#     SEEDS=("$2")
-# fi
+if [ -n "$2" ]; then
+    SEEDS=("$2")
+fi
 EVALUATION_TYPE="traditional_datasets"
 EPOCHS=50
 T_MAX=$EPOCHS
@@ -22,6 +22,7 @@ BATCH_SIZE=8
 NUM_WORKERS=8
 NUM_AVG_VAL=1
 NUM_CROPS=20
+
 # For KADID-10K and PIPAL, the patch size is 8x8:
 if [ "$TRAIN_DATASETS" == "KADID-10K" ] || [ "$TRAIN_DATASETS" == "PIPAL" ]; then
     PATCH_SIZE=8
@@ -31,6 +32,10 @@ fi
 # EVAL_CENTER_CROP="--eval-center-crop"
 EVAL_CENTER_CROP=""
 LOG_EVAL_PREDICTIONS="--log_eval_predictions"
+
+if [ "$EVAL_CENTER_CROP" == "--eval-center-crop" ]; then
+    NUM_CROPS=1
+fi
 
 for dataset in "${DATASETS[@]}"; do
     for seed in "${SEEDS[@]}"; do
